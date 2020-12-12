@@ -16,7 +16,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
  */
 #ifdef TARGET_LPC1768
@@ -31,17 +31,18 @@
 #include <CDCSerial.h>
 #include <usb/mscuser.h>
 
-extern "C" {
-  #include <debug_frmwrk.h>
-}
-
-#include "../../sd/cardreader.h"
 #include "../../inc/MarlinConfig.h"
 #include "../../core/millis_t.h"
 
+#include "../../sd/cardreader.h"
+
 extern uint32_t MSC_SD_Init(uint8_t pdrv);
-extern "C" int isLPC1769();
-extern "C" void disk_timerproc();
+
+extern "C" {
+  #include <debug_frmwrk.h>
+  extern "C" int isLPC1769();
+  extern "C" void disk_timerproc();
+}
 
 void SysTick_Callback() { disk_timerproc(); }
 
@@ -122,7 +123,7 @@ void HAL_init() {
   delay(1000);                              // Give OS time to notice
   USB_Connect(TRUE);
 
-  #if DISABLED(NO_SD_HOST_DRIVE)
+  #if HAS_SD_HOST_DRIVE
     MSC_SD_Init(0);                         // Enable USB SD card access
   #endif
 

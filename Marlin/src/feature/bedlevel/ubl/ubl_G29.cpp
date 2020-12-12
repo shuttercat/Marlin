@@ -16,7 +16,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
  */
 
@@ -28,9 +28,9 @@
 
   #include "../../../MarlinCore.h"
   #include "../../../HAL/shared/eeprom_api.h"
-  #include "../../../libs/hex_print_routines.h"
-  #include "../../../module/configuration_store.h"
-  #include "../../../lcd/ultralcd.h"
+  #include "../../../libs/hex_print.h"
+  #include "../../../module/settings.h"
+  #include "../../../lcd/marlinui.h"
   #include "../../../module/stepper.h"
   #include "../../../module/planner.h"
   #include "../../../module/motion.h"
@@ -321,7 +321,7 @@
     // Check for commands that require the printer to be homed
     if (may_move) {
       planner.synchronize();
-      if (axes_need_homing()) gcode.home_all_axes();
+      if (axes_should_home()) gcode.home_all_axes();
       TERN_(HAS_MULTI_HOTEND, if (active_extruder) tool_change(0));
     }
 
@@ -462,7 +462,7 @@
             // Manually Probe Mesh in areas that can't be reached by the probe
             //
             SERIAL_ECHOLNPGM("Manually probing unreachable points.");
-            do_blocking_move_to_z(Z_CLEARANCE_BETWEEN_PROBES);
+            do_z_clearance(Z_CLEARANCE_BETWEEN_PROBES);
 
             if (parser.seen('C') && !xy_seen) {
 
@@ -484,7 +484,7 @@
             }
 
             if (parser.seen('B')) {
-              g29_card_thickness = parser.has_value() ? parser.value_float() : measure_business_card_thickness(float(Z_CLEARANCE_BETWEEN_PROBES));
+              g29_card_thickness = parser.has_value() ? parser.value_float() : measure_business_card_thickness();
               if (ABS(g29_card_thickness) > 1.5f) {
                 SERIAL_ECHOLNPGM("?Error in Business Card measurement.");
                 return;
@@ -727,7 +727,7 @@
      * Probe all invalidated locations of the mesh that can be reached by the probe.
      * This attempts to fill in locations closest to the nozzle's start location first.
      */
-    void unified_bed_leveling::probe_entire_mesh(const xy_pos_t &near, const bool do_ubl_mesh_map, const bool stow_probe, const bool do_furthest) {
+    void unified_bed_leveling::probe_entire_mesh(const xy_pos_t &nearby, const bool do_ubl_mesh_map, const bool stow_probe, const bool do_furthest) {
       probe.deploy(); // Deploy before ui.capture() to allow for PAUSE_BEFORE_DEPLOY_STOW
 
       TERN_(HAS_LCD_MENU, ui.capture());
@@ -736,6 +736,7 @@
       uint8_t count = GRID_MAX_POINTS;
 
       mesh_index_pair best;
+      TERN_(EXTENSIBLE_UI, ExtUI::onMeshUpdate(best.pos, ExtUI::MESH_START));
       do {
         if (do_ubl_mesh_map) display_map(g29_map_type);
 
@@ -757,7 +758,7 @@
 
         best = do_furthest
           ? find_furthest_invalid_mesh_point()
-          : find_closest_mesh_point_of_type(INVALID, near, true);
+          : find_closest_mesh_point_of_type(INVALID, nearby, true);
 
         if (best.pos.x >= 0) {    // mesh point found and is reachable by probe
           TERN_(EXTENSIBLE_UI, ExtUI::onMeshUpdate(best.pos, ExtUI::PROBE_START));
@@ -775,20 +776,20 @@
 
       } while (best.pos.x >= 0 && --count);
 
+      TERN_(EXTENSIBLE_UI, ExtUI::onMeshUpdate(best.pos, ExtUI::MESH_FINISH));
+
       // Release UI during stow to allow for PAUSE_BEFORE_DEPLOY_STOW
       TERN_(HAS_LCD_MENU, ui.release());
       probe.stow();
       TERN_(HAS_LCD_MENU, ui.capture());
 
-      #ifdef Z_AFTER_PROBING
-        probe.move_z_after_probing();
-      #endif
+      probe.move_z_after_probing();
 
       restore_ubl_active_state_and_leave();
 
       do_blocking_move_to_xy(
-        constrain(near.x - probe.offset_xy.x, MESH_MIN_X, MESH_MAX_X),
-        constrain(near.y - probe.offset_xy.y, MESH_MIN_Y, MESH_MAX_Y)
+        constrain(nearby.x - probe.offset_xy.x, MESH_MIN_X, MESH_MAX_X),
+        constrain(nearby.y - probe.offset_xy.y, MESH_MIN_Y, MESH_MAX_Y)
       );
     }
 
@@ -836,11 +837,11 @@
 
     static void echo_and_take_a_measurement() { SERIAL_ECHOLNPGM(" and take a measurement."); }
 
-    float unified_bed_leveling::measure_business_card_thickness(float in_height) {
+    float unified_bed_leveling::measure_business_card_thickness() {
       ui.capture();
       save_ubl_active_state_and_disable();   // Disable bed level correction for probing
 
-      do_blocking_move_to(0.5f * (MESH_MAX_X - (MESH_MIN_X)), 0.5f * (MESH_MAX_Y - (MESH_MIN_Y)), in_height);
+      do_blocking_move_to(0.5f * (MESH_MAX_X - (MESH_MIN_X)), 0.5f * (MESH_MAX_Y - (MESH_MIN_Y)), MANUAL_PROBE_START_Z);
         //, _MIN(planner.settings.max_feedrate_mm_s[X_AXIS], planner.settings.max_feedrate_mm_s[Y_AXIS]) * 0.5f);
       planner.synchronize();
 
@@ -858,7 +859,6 @@
       echo_and_take_a_measurement();
 
       const float z2 = measure_point_with_encoder();
-
       do_blocking_move_to_z(current_position.z + Z_CLEARANCE_BETWEEN_PROBES);
 
       const float thickness = ABS(z1 - z2);
@@ -899,7 +899,7 @@
         LCD_MESSAGEPGM(MSG_UBL_MOVING_TO_NEXT);
 
         do_blocking_move_to(ppos);
-        do_blocking_move_to_z(z_clearance);
+        do_z_clearance(z_clearance);
 
         KEEPALIVE_STATE(PAUSED_FOR_USER);
         ui.capture();
@@ -915,7 +915,7 @@
 
         if (click_and_hold()) {
           SERIAL_ECHOLNPGM("\nMesh only partially populated.");
-          do_blocking_move_to_z(Z_CLEARANCE_DEPLOY_PROBE);
+          do_z_clearance(Z_CLEARANCE_DEPLOY_PROBE);
           return restore_ubl_active_state_and_leave();
         }
 
@@ -940,7 +940,7 @@
 
     void abort_fine_tune() {
       ui.return_to_status();
-      do_blocking_move_to_z(Z_CLEARANCE_BETWEEN_PROBES);
+      do_z_clearance(Z_CLEARANCE_BETWEEN_PROBES);
       set_message_with_feedback(GET_TEXT(MSG_EDITING_STOPPED));
     }
 
@@ -949,7 +949,7 @@
         g29_repetition_cnt = 1;   // do exactly one mesh location. Otherwise use what the parser decided.
 
       #if ENABLED(UBL_MESH_EDIT_MOVES_Z)
-        const float h_offset = parser.seenval('H') ? parser.value_linear_units() : 0;
+        const float h_offset = parser.seenval('H') ? parser.value_linear_units() : MANUAL_PROBE_START_Z;
         if (!WITHIN(h_offset, 0, 10)) {
           SERIAL_ECHOLNPGM("Offset out of bounds. (0 to 10mm)\n");
           return;
@@ -969,8 +969,6 @@
       ui.capture();                                               // Take over control of the LCD encoder
 
       do_blocking_move_to_xy_z(pos, Z_CLEARANCE_BETWEEN_PROBES);  // Move to the given XY with probe clearance
-
-      TERN_(UBL_MESH_EDIT_MOVES_Z, do_blocking_move_to_z(h_offset));  // Move Z to the given 'H' offset
 
       MeshFlags done_flags{0};
       const xy_int8_t &lpos = location.pos;
@@ -997,6 +995,10 @@
 
         if (do_ubl_mesh_map) display_map(g29_map_type);     // Display the current point
 
+        #if IS_TFTGLCD_PANEL
+          ui.ubl_plot(lpos.x, lpos.y);   // update plot screen
+        #endif
+
         ui.refresh();
 
         float new_z = z_values[lpos.x][lpos.y];
@@ -1005,12 +1007,16 @@
 
         lcd_mesh_edit_setup(new_z);
 
+        SET_SOFT_ENDSTOP_LOOSE(true);
+
         do {
           idle();
           new_z = lcd_mesh_edit();
           TERN_(UBL_MESH_EDIT_MOVES_Z, do_blocking_move_to_z(h_offset + new_z)); // Move the nozzle as the point is edited
           SERIAL_FLUSH();                                   // Prevent host M105 buffer overrun.
         } while (!ui.button_pressed());
+
+        SET_SOFT_ENDSTOP_LOOSE(false);
 
         if (!lcd_map_control) ui.return_to_status();        // Just editing a single point? Return to status
 
@@ -1200,7 +1206,7 @@
 
       found_a_NAN = true;
 
-      xy_int8_t near { -1, -1 };
+      xy_int8_t nearby { -1, -1 };
       float d1, d2 = 99999.9f;
       GRID_LOOP(k, l) {
         if (isnan(z_values[k][l])) continue;
@@ -1215,7 +1221,7 @@
 
         if (d1 < d2) {    // Invalid mesh point (i,j) is closer to the defined point (k,l)
           d2 = d1;
-          near.set(i, j);
+          nearby.set(i, j);
         }
       }
 
@@ -1223,8 +1229,8 @@
       // At this point d2 should have the near defined mesh point to invalid mesh point (i,j)
       //
 
-      if (found_a_real && near.x >= 0 && d2 > farthest.distance) {
-        farthest.pos = near;      // Found an invalid location farther from the defined mesh point
+      if (found_a_real && nearby.x >= 0 && d2 > farthest.distance) {
+        farthest.pos = nearby; // Found an invalid location farther from the defined mesh point
         farthest.distance = d2;
       }
     } // GRID_LOOP
@@ -1415,9 +1421,7 @@
         }
 
         probe.stow();
-        #ifdef Z_AFTER_PROBING
-          probe.move_z_after_probing();
-        #endif
+        probe.move_z_after_probing();
 
         if (abort_flag) {
           SERIAL_ECHOLNPGM("?Error probing point. Aborting operation.");
@@ -1478,9 +1482,7 @@
         }
       }
       probe.stow();
-      #ifdef Z_AFTER_PROBING
-        probe.move_z_after_probing();
-      #endif
+      probe.move_z_after_probing();
 
       if (abort_flag || finish_incremental_LSF(&lsf_results)) {
         SERIAL_ECHOPGM("Could not complete LSF!");
